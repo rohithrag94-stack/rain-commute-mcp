@@ -16,10 +16,28 @@
     <version>0.1.0</version>
     <name>rain-commute-mcp</name>
     <description>MCP server that checks for rain along your commute route</description>
+    <url>https://github.com/rohithrag94-stack/rain-check</url>
+    <inceptionYear>2026</inceptionYear>
+
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <scm>
+        <url>https://github.com/rohithrag94-stack/rain-check</url>
+        <connection>scm:git:https://github.com/rohithrag94-stack/rain-check.git</connection>
+        <developerConnection>scm:git:https://github.com/rohithrag94-stack/rain-check.git</developerConnection>
+        <tag>HEAD</tag>
+    </scm>
 
     <properties>
         <java.version>25</java.version>
         <spring-ai.version>2.0.0</spring-ai.version>
+        <jacoco.version>0.8.14</jacoco.version>
     </properties>
 
     <dependencyManagement>
@@ -59,6 +77,70 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <configuration>
+                    <excludes>
+                        <exclude>com/rocommute/mcp/RainCommuteMcpApplication.class</exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>check</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>1.00</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>METHOD</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>1.00</minimum>
+                                        </limit>
+                                        <!--
+                                            javac wraps pattern-matching switch cases in a synthetic
+                                            MatchException catch/throw that JaCoCo counts as branches but
+                                            that ordinary tests can never reach (jacoco/jacoco#1514,
+                                            jacoco/jacoco#1219). All 4 currently-missed branches are this
+                                            synthetic path; ceiling is pinned to that known baseline so any
+                                            *new* real gap still fails the build.
+                                        -->
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>MISSEDCOUNT</value>
+                                            <maximum>4</maximum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
