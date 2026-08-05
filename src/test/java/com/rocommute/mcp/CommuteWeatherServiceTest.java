@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.reactive.function.client.WebClient;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -39,6 +40,8 @@ class CommuteWeatherServiceTest {
     private HttpServer geocodingServer;
     private volatile String forecastResponseBody;
     private volatile String geocodingResponseBody = GEOCODING_SUCCESS_BODY;
+    private WebClient weatherWebClient;
+    private GeocodingClient geocodingClient;
     private CommuteWeatherService service;
 
     @BeforeEach
@@ -53,12 +56,13 @@ class CommuteWeatherServiceTest {
 
         var config = new WeatherClientConfig();
         var sharedBuilder = config.webClientBuilder();
-        var weatherWebClient = config.weatherWebClient(
+        weatherWebClient = config.weatherWebClient(
                 sharedBuilder, "http://localhost:" + weatherServer.getAddress().getPort());
         var geocodingWebClient = config.geocodingWebClient(
                 sharedBuilder, "http://localhost:" + geocodingServer.getAddress().getPort());
+        geocodingClient = new GeocodingClient(geocodingWebClient);
 
-        service = new CommuteWeatherService(weatherWebClient, new GeocodingClient(geocodingWebClient), FIXED_CLOCK);
+        service = new CommuteWeatherService(weatherWebClient, geocodingClient, FIXED_CLOCK);
     }
 
     private static void respondWith(com.sun.net.httpserver.HttpExchange exchange, String body) throws IOException {
@@ -82,7 +86,7 @@ class CommuteWeatherServiceTest {
                 {
                   "timezone": "Asia/Kolkata",
                   "hourly": {
-                    "time": ["2026-01-01T16:00"],
+                    "time": ["2026-01-01T17:00"],
                     "precipitation_probability": [20],
                     "rain": [0.0]
                   }
@@ -92,7 +96,7 @@ class CommuteWeatherServiceTest {
         var result = service.checkRainOnCommute("Bengaluru", 30);
 
         assertThat(result).isEqualTo(
-                "Looks dry in Bengaluru, India around your arrival time (2026-01-01T16:00): only 20% chance of rain.");
+                "Looks dry in Bengaluru, India around your arrival time (2026-01-01T17:00): only 20% chance of rain.");
     }
 
     @Test
@@ -101,7 +105,7 @@ class CommuteWeatherServiceTest {
                 {
                   "timezone": "Asia/Kolkata",
                   "hourly": {
-                    "time": ["2026-01-01T16:00"],
+                    "time": ["2026-01-01T17:00"],
                     "precipitation_probability": [80],
                     "rain": [0.0]
                   }
@@ -111,7 +115,7 @@ class CommuteWeatherServiceTest {
         var result = service.checkRainOnCommute("Bengaluru", 30);
 
         assertThat(result).isEqualTo(
-                "Rain likely in Bengaluru, India around your arrival time (2026-01-01T16:00): 80% chance, 0.0mm expected. Grab an umbrella.");
+                "Rain likely in Bengaluru, India around your arrival time (2026-01-01T17:00): 80% chance, 0.0mm expected. Grab an umbrella.");
     }
 
     @Test
@@ -120,7 +124,7 @@ class CommuteWeatherServiceTest {
                 {
                   "timezone": "Asia/Kolkata",
                   "hourly": {
-                    "time": ["2026-01-01T16:00"],
+                    "time": ["2026-01-01T17:00"],
                     "precipitation_probability": [10],
                     "rain": [2.5]
                   }
@@ -130,17 +134,18 @@ class CommuteWeatherServiceTest {
         var result = service.checkRainOnCommute("Bengaluru", 30);
 
         assertThat(result).isEqualTo(
-                "Rain likely in Bengaluru, India around your arrival time (2026-01-01T16:00): 10% chance, 2.5mm expected. Grab an umbrella.");
+                "Rain likely in Bengaluru, India around your arrival time (2026-01-01T17:00): 10% chance, 2.5mm expected. Grab an umbrella.");
     }
 
     /**
      * The regression test for the timezone bug: the fixed clock's instant, expressed as UTC wall
-     * time, would floor to "2026-01-01T10:00" -- and the old implementation, which formatted
-     * arrival time in the clock's own zone instead of the destination's, would have looked for
-     * exactly that string. Asia/Kolkata is UTC+5:30, so the *correct* destination-local arrival
-     * hour is "2026-01-01T16:00". Only an hourly array containing that string (and not the
-     * UTC-wall-clock one) should produce a Result here; if the zone handling regresses to using
-     * the server's own zone, this falls through to "doesn't cover the arrival time" instead.
+     * time (ignoring commute-time rounding), sits in the "10:00"/"11:00" hour -- exactly what an
+     * implementation that used the clock's own zone instead of the destination's would compute.
+     * Asia/Kolkata is UTC+5:30, so the *correct* destination-local arrival hour is
+     * "2026-01-01T17:00" (see the ceiling-semantics test below for why it's 17:00 and not 16:00).
+     * Every other bucket here is seeded with a high rain probability specifically so that landing
+     * on any of them -- via the wrong zone, or the wrong floor/ceiling rule -- flips the verdict
+     * to "Rain likely", making a regression obvious rather than silently matching.
      */
     @Test
     void arrivalTime_isComputedInDestinationTimezone_notServerTimezone() {
@@ -148,8 +153,34 @@ class CommuteWeatherServiceTest {
                 {
                   "timezone": "Asia/Kolkata",
                   "hourly": {
-                    "time": ["2026-01-01T10:00", "2026-01-01T16:00"],
-                    "precipitation_probability": [99, 5],
+                    "time": ["2026-01-01T10:00", "2026-01-01T11:00", "2026-01-01T16:00", "2026-01-01T17:00"],
+                    "precipitation_probability": [99, 99, 99, 5],
+                    "rain": [0.0, 0.0, 0.0, 0.0]
+                  }
+                }
+                """;
+
+        var result = service.checkRainOnCommute("Bengaluru", 30);
+
+        assertThat(result).isEqualTo(
+                "Looks dry in Bengaluru, India around your arrival time (2026-01-01T17:00): only 5% chance of rain.");
+    }
+
+    /**
+     * precipitation_probability and rain are "preceding hour" values in the Open-Meteo API (the
+     * "20:00" bucket covers rain that fell *before* 20:00, not after -- verified against the live
+     * docs, see AGENTS.md). So an arrival at 16:15:30 IST (10:15:30Z + 30 minutes, in Asia/Kolkata)
+     * falls inside the window the *17:00* bucket describes, not 16:00 -- the target hour must be
+     * rounded up, not down.
+     */
+    @Test
+    void arrivalTime_isRoundedUpToNextHour_notFlooredDown() {
+        forecastResponseBody = """
+                {
+                  "timezone": "Asia/Kolkata",
+                  "hourly": {
+                    "time": ["2026-01-01T16:00", "2026-01-01T17:00"],
+                    "precipitation_probability": [99, 20],
                     "rain": [0.0, 0.0]
                   }
                 }
@@ -158,7 +189,35 @@ class CommuteWeatherServiceTest {
         var result = service.checkRainOnCommute("Bengaluru", 30);
 
         assertThat(result).isEqualTo(
-                "Looks dry in Bengaluru, India around your arrival time (2026-01-01T16:00): only 5% chance of rain.");
+                "Looks dry in Bengaluru, India around your arrival time (2026-01-01T17:00): only 20% chance of rain.");
+    }
+
+    /**
+     * The one case where rounding up would be wrong: an arrival that lands exactly on the hour is
+     * already the top of its own preceding-hour window, so it must stay put rather than jump to
+     * the next hour. Needs its own {@link Clock}, since {@link #FIXED_CLOCK}'s ":15:30" offset can
+     * never land on an exact minute boundary no matter how many whole commute-minutes are added.
+     */
+    @Test
+    void exactHourArrival_isNotRoundedUpToNextHour() {
+        // 2026-01-01T10:30:00Z is exactly 2026-01-01T16:00:00 in Asia/Kolkata (UTC+5:30).
+        var exactHourClock = Clock.fixed(Instant.parse("2026-01-01T10:30:00Z"), ZoneOffset.UTC);
+        var exactHourService = new CommuteWeatherService(weatherWebClient, geocodingClient, exactHourClock);
+        forecastResponseBody = """
+                {
+                  "timezone": "Asia/Kolkata",
+                  "hourly": {
+                    "time": ["2026-01-01T16:00", "2026-01-01T17:00"],
+                    "precipitation_probability": [20, 99],
+                    "rain": [0.0, 0.0]
+                  }
+                }
+                """;
+
+        var result = exactHourService.checkRainOnCommute("Bengaluru", 0);
+
+        assertThat(result).isEqualTo(
+                "Looks dry in Bengaluru, India around your arrival time (2026-01-01T16:00): only 20% chance of rain.");
     }
 
     @Test
@@ -192,7 +251,7 @@ class CommuteWeatherServiceTest {
         forecastResponseBody = """
                 {
                   "hourly": {
-                    "time": ["2026-01-01T16:00"],
+                    "time": ["2026-01-01T17:00"],
                     "precipitation_probability": [20],
                     "rain": [0.0]
                   }
@@ -229,6 +288,6 @@ class CommuteWeatherServiceTest {
         var result = service.checkRainOnCommute("Bengaluru", 30);
 
         assertThat(result).isEqualTo(
-                "Forecast for Bengaluru, India doesn't cover the arrival time (2026-01-01T16:00). Try a shorter commute window.");
+                "Forecast for Bengaluru, India doesn't cover the arrival time (2026-01-01T17:00). Try a shorter commute window.");
     }
 }

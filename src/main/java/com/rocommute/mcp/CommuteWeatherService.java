@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.stream.StreamSupport;
 
 /**
@@ -128,10 +129,15 @@ public class CommuteWeatherService {
         var destinationZone = ZoneId.of(forecast.get(TIMEZONE_FIELD).asString());
         var arrivalTime = ZonedDateTime.ofInstant(
                 clock.instant().plus(Duration.ofMinutes(commuteMinutes)), destinationZone);
-        // Floor (not round) to the top of the arrival hour, matching the API's hourly buckets.
-        var targetHour = arrivalTime
-                .withMinute(0).withSecond(0).withNano(0)
-                .format(HOUR_FORMAT);
+        // Ceiling (not floor) to the top of the arrival hour. Both PRECIPITATION_PROBABILITY_FIELD
+        // and RAIN_FIELD are "preceding hour" aggregates per Open-Meteo's docs -- the bucket
+        // labelled e.g. "20:00" covers the window (19:00, 20:00], i.e. rain that fell *before*
+        // 20:00, not after. So an arrival at 20:59 falls in the (19:00, 20:00] window covered by
+        // the *21:00* bucket, not the 20:00 one -- round up, except when arrival lands exactly on
+        // the hour, which is itself the top of its own preceding-hour window.
+        var truncatedToHour = arrivalTime.truncatedTo(ChronoUnit.HOURS);
+        var targetHourTime = truncatedToHour.equals(arrivalTime) ? truncatedToHour : truncatedToHour.plusHours(1);
+        var targetHour = targetHourTime.format(HOUR_FORMAT);
 
         var hourly = forecast.get(HOURLY_FIELD);
         var times = StreamSupport.stream(hourly.get(TIME_FIELD).spliterator(), false)

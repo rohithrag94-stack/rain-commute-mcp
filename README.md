@@ -8,9 +8,13 @@ The server exposes a single MCP tool, `checkRainOnCommute`, backed by the free [
 
 1. Takes a destination as a plain place name or address (e.g. `"Bengaluru"`, `"Eiffel Tower, Paris"`) and a commute duration in minutes — no coordinates required.
 2. Geocodes the destination to coordinates.
-3. Computes your arrival time (now + commute duration, floored to the hour) **in the destination's own local timezone**, from its forecast response — not the server's timezone, so results are correct no matter where the user or the server process happens to be.
+3. Computes your arrival time (now + commute duration, rounded up to the next hour — see [How rounding works](#how-rounding-works)) **in the destination's own local timezone**, from its forecast response — not the server's timezone, so results are correct no matter where the user or the server process happens to be.
 4. Fetches the hourly forecast for that location and reads off precipitation probability and rain amount for the arrival hour.
 5. Returns a plain-language verdict — dry, or grab an umbrella.
+
+### How rounding works
+
+Open-Meteo's `precipitation_probability` and `rain` are **preceding-hour** values — the bucket labelled `20:00` covers rain that fell between 19:00 and 20:00, not 20:00 and 21:00. So an arrival at, say, 20:44 doesn't look up the `20:00` bucket; it rounds up to `21:00`, since that's the bucket whose preceding-hour window (20:00–21:00) is the one that actually contains 20:44. An arrival landing exactly on the hour (e.g. 21:00:00) is the one case that *doesn't* round up — it's already the top of its own window.
 
 ## Prerequisites
 
