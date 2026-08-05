@@ -8,9 +8,10 @@ import org.springframework.web.reactive.function.client.WebClient;
 import java.time.Clock;
 
 /**
- * Provides the collaborators {@link CommuteWeatherService} depends on, as beans rather than
- * fields it builds itself — so tests can supply a stub {@link WebClient} pointed at a local
- * server and a fixed {@link Clock}, instead of hitting the real weather API on real wall-clock time.
+ * Provides the collaborators {@link CommuteWeatherService} and {@link GeocodingClient} depend
+ * on, as beans rather than fields they build themselves — so tests can supply stub
+ * {@link WebClient}s pointed at a local server and a fixed {@link Clock}, instead of hitting the
+ * real APIs on real wall-clock time.
  */
 @Configuration
 public class WeatherClientConfig {
@@ -34,7 +35,21 @@ public class WeatherClientConfig {
             WebClient.Builder webClientBuilder,
             @Value("${rain-commute.weather-api.base-url:https://api.open-meteo.com}") String weatherApiBaseUrl
     ) {
-        return webClientBuilder.baseUrl(weatherApiBaseUrl).build();
+        // .clone() so this bean's baseUrl doesn't leak into geocodingWebClient's build below --
+        // both factory methods receive the same singleton builder instance.
+        return webClientBuilder.clone().baseUrl(weatherApiBaseUrl).build();
+    }
+
+    /**
+     * @param geocodingApiBaseUrl base URL of the place-name geocoding API; overridable via the
+     *                            {@code rain-commute.geocoding-api.base-url} property
+     */
+    @Bean
+    WebClient geocodingWebClient(
+            WebClient.Builder webClientBuilder,
+            @Value("${rain-commute.geocoding-api.base-url:https://geocoding-api.open-meteo.com}") String geocodingApiBaseUrl
+    ) {
+        return webClientBuilder.clone().baseUrl(geocodingApiBaseUrl).build();
     }
 
     @Bean

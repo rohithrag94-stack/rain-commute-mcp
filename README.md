@@ -1,15 +1,16 @@
 # rain-commute-mcp
 
-An [MCP](https://modelcontextprotocol.io) server that checks whether rain is expected around the time you'd arrive at a destination, given how long your commute takes. Ask your MCP client "will it rain by the time I get to the office" and it looks up the forecast for the hour you'll actually land in — not just "right now."
+An [MCP](https://modelcontextprotocol.io) server that checks whether rain is expected around the time you'd arrive at a destination, given how long your commute takes. Ask your MCP client "will it rain by the time I get to Bengaluru" and it looks up the forecast for the hour you'll actually land in — not just "right now."
 
 ## How it works
 
-The server exposes a single MCP tool, `checkRainOnCommute`, backed by the free [Open-Meteo](https://open-meteo.com/) forecast API:
+The server exposes a single MCP tool, `checkRainOnCommute`, backed by the free [Open-Meteo](https://open-meteo.com/) forecast and geocoding APIs:
 
-1. Takes a destination (`latitude`, `longitude`) and a commute duration in minutes.
-2. Computes your arrival time (now + commute duration, floored to the hour).
-3. Fetches the hourly forecast for that location and reads off precipitation probability and rain amount for the arrival hour.
-4. Returns a plain-language verdict — dry, or grab an umbrella.
+1. Takes a destination as a plain place name or address (e.g. `"Bengaluru"`, `"Eiffel Tower, Paris"`) and a commute duration in minutes — no coordinates required.
+2. Geocodes the destination to coordinates.
+3. Computes your arrival time (now + commute duration, floored to the hour) **in the destination's own local timezone**, from its forecast response — not the server's timezone, so results are correct no matter where the user or the server process happens to be.
+4. Fetches the hourly forecast for that location and reads off precipitation probability and rain amount for the arrival hour.
+5. Returns a plain-language verdict — dry, or grab an umbrella.
 
 ## Prerequisites
 
@@ -65,6 +66,7 @@ Restart Claude Desktop and the `checkRainOnCommute` tool becomes available in co
 | Property | Default | Description |
 |---|---|---|
 | `rain-commute.weather-api.base-url` | `https://api.open-meteo.com` | Base URL of the weather forecast API. Override to point at a mock/staging endpoint. |
+| `rain-commute.geocoding-api.base-url` | `https://geocoding-api.open-meteo.com` | Base URL of the place-name geocoding API. Override to point at a mock/staging endpoint. |
 | `spring.ai.mcp.server.name` | `rain-commute-mcp` | MCP server name advertised to clients. |
 | `spring.ai.mcp.server.version` | `0.1.0` | MCP server version advertised to clients. |
 
@@ -83,7 +85,8 @@ Runs the unit test suite and enforces 100% line and method coverage via JaCoCo (
 ```
 src/main/java/com/rocommute/mcp/
 ├── RainCommuteMcpApplication.java   # Boot entry point (excluded from coverage — no testable logic)
-├── WeatherClientConfig.java         # WebClient + Clock beans
+├── WeatherClientConfig.java         # WebClient (weather + geocoding) + Clock beans
+├── GeocodingClient.java             # Resolves a place name/address to coordinates
 └── CommuteWeatherService.java       # The @McpTool and its forecast logic
 ```
 

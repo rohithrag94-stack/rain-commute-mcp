@@ -28,6 +28,13 @@ class WeatherClientConfigTest {
     }
 
     @Test
+    void geocodingWebClient_buildsClientWithConfiguredBaseUrl() {
+        WebClient webClient = config.geocodingWebClient(WebClient.builder(), "https://geocoding-api.open-meteo.com");
+
+        assertThat(webClient).isNotNull();
+    }
+
+    @Test
     void clock_returnsSystemDefaultZoneClock() {
         Clock clock = config.clock();
 
