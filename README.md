@@ -2,6 +2,8 @@
 
 An [MCP](https://modelcontextprotocol.io) server that checks whether rain is expected around the time you'd arrive at a destination, given how long your commute takes. Ask your MCP client "will it rain by the time I get to Bengaluru" and it looks up the forecast for the hour you'll actually land in — not just "right now."
 
+![Demo: asking Claude Desktop "I am going to leave office now. How is the weather at Hoofddorp in 30 minutes?" and getting a live rain forecast back via the checkRainOnCommute tool](docs/demo.gif)
+
 ## How it works
 
 The server exposes a single MCP tool, `checkRainOnCommute`, backed by the free [Open-Meteo](https://open-meteo.com/) forecast and geocoding APIs:
