@@ -16,6 +16,16 @@ import java.time.Clock;
 public class WeatherClientConfig {
 
     /**
+     * Spring Boot's {@code WebClientAutoConfiguration} only fires for a reactive web
+     * application; {@code spring.main.web-application-type=none} (required for a stdio-only MCP
+     * server) turns it off, so a plain builder is provided here instead.
+     */
+    @Bean
+    WebClient.Builder webClientBuilder() {
+        return WebClient.builder();
+    }
+
+    /**
      * @param weatherApiBaseUrl base URL of the weather forecast API; overridable via the
      *                          {@code rain-commute.weather-api.base-url} property
      */

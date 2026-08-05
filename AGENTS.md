@@ -33,6 +33,9 @@ This stack moved fast between Spring AI 1.x-era tutorials (what most existing bl
 - **MCP tool registration changed**: tools are `@McpTool` / `@McpToolParam` from `org.springframework.ai.mcp.annotation`, auto-discovered on *any* Spring bean (e.g. a plain `@Service`). There is **no** `MethodToolCallbackProvider` bean to wire up — that was the 1.0.0-era pattern. Don't reintroduce it.
 - **Jackson 3, not classic Jackson 2**: Spring Boot 4's `spring-boot-starter-jackson` pulls in `tools.jackson.core:jackson-databind:3.x`. The whole package tree renamed `com.fasterxml.jackson.*` → `tools.jackson.*`, **except** `jackson-annotations`, which stays under `com.fasterxml.jackson.annotation` for cross-version compat. Method names mostly held steady (`asInt()`, `asDouble()`, `has()`, `get()`, `forEach()` via `Iterable`), but `asText()` is deprecated in favor of `asString()` — use the latter in new code.
 - Coverage tooling: **JaCoCo needs ≥0.8.14** to read Java 25 bytecode (class file version 69); older versions fail with "Unsupported class file major version 69".
+- **`spring.main.web-application-type=none` (required for a stdio-only server) disables `WebClientAutoConfiguration`**, so no `WebClient.Builder` bean exists — even though `spring-boot-starter-webflux` is on the classpath. `WeatherClientConfig` provides one manually (`@Bean WebClient.Builder webClientBuilder()`). Don't remove it assuming the starter will supply it; it won't, in this `web-application-type`.
+- **An empty `logging.pattern.console=` (the trick used by the official Spring AI stdio examples, meant to keep stdout clean of log lines so it doesn't corrupt the MCP JSON-RPC stream) is fatal on the Logback version bundled with Spring Boot 4** — it aborts startup with `ERROR ... PatternLayout("") - Empty or null pattern`, with no further diagnostics on either stream since logging itself failed to initialize. Use `logging.level.root=OFF` instead, which achieves the same "silent stdout" goal without depending on pattern parsing at all.
+- **Neither of the two bugs above was caught by the unit test suite despite 100% line/method coverage** — the tests construct `CommuteWeatherService`/`WeatherClientConfig` directly and never load a Spring `ApplicationContext` or read `application.properties`, so context-wiring and property-parsing failures are invisible to them. Coverage numbers only prove the Java logic runs; they say nothing about whether the Spring context actually boots. **Always do at least one real end-to-end run (`java -jar target/*.jar`, or via MCP Inspector) after touching `WeatherClientConfig` or `application.properties`** — see "Manual end-to-end testing" below.
 
 ## Testing conventions
 
@@ -41,6 +44,26 @@ This stack moved fast between Spring AI 1.x-era tutorials (what most existing bl
 - Coverage gate is `mvn verify` (not just `test`) — JaCoCo's `check` goal runs in the `verify` phase.
 - **Branch coverage on `CommuteWeatherService.checkRainOnCommute`'s switch will never hit 100% via ratio.** `javac` wraps pattern-matching `switch` cases (JEP 441) in a synthetic `MatchException` catch/throw for exhaustiveness that JaCoCo counts as branches but that is not reachable from application-level tests (confirmed: [jacoco/jacoco#1514](https://github.com/jacoco/jacoco/issues/1514), [#1219](https://github.com/jacoco/jacoco/issues/1219)). The `pom.xml` JaCoCo `check` rule pins `BRANCH` to a `MISSEDCOUNT` ceiling (currently 4, the known synthetic baseline) instead of a `COVEREDRATIO`, so a genuinely new missed branch still fails the build. If you add a new `switch`-over-sealed-type case and the missed-branch count grows only by the number of new cases' synthetic paths, that's expected — don't chase it by rewriting to if/else chains; re-verify the new baseline and update the `<maximum>` with a comment explaining the delta.
 - `RainCommuteMcpApplication` is excluded from JaCoCo coverage entirely (see `pom.xml` `<excludes>`). Its `main()` starts a real MCP stdio server that blocks reading stdin — not safely unit-testable, and there's no independent logic in it worth testing.
+
+## Manual end-to-end testing
+
+`mvn verify`'s 100% coverage does **not** exercise the Spring context or `application.properties` (see above) — it's not a substitute for actually starting the server. Two ways to do that:
+
+1. **Standalone**, to catch startup failures fast: `java -jar target/rain-commute-mcp-0.1.0.jar` with stdin left open (don't redirect from `/dev/null`/`NUL` — that's immediate EOF, which a stdio server correctly treats as "client disconnected" and exits, which looks identical to a real crash unless you check carefully). A healthy server just sits there silently.
+2. **MCP Inspector CLI**, to actually call the tool: the web UI (`npx @modelcontextprotocol/inspector java -jar ...`, opens `localhost:6274`) is fine for poking around interactively, but its positional-argument parsing chokes on `-jar` (a token starting with `-` inside the target command breaks its variadic-arg collection) and its own "Servers" landing page in recent versions has no in-page tool-calling UI — connecting there only proves the JSON-RPC handshake works, not that a tool call succeeds. The **CLI mode with an explicit config file** sidesteps both problems and is the reliable option:
+
+   ```json
+   // mcp-config.json
+   { "mcpServers": { "rain-commute": { "command": "java", "args": ["-jar", "target/rain-commute-mcp-0.1.0.jar"] } } }
+   ```
+
+   ```bash
+   npx @modelcontextprotocol/inspector --cli --config mcp-config.json --server rain-commute --method tools/list
+
+   npx @modelcontextprotocol/inspector --cli --config mcp-config.json --server rain-commute \
+     --method tools/call --tool-name checkRainOnCommute \
+     --tool-arg destLat=52.3676 --tool-arg destLng=4.9041 --tool-arg commuteMinutes=30
+   ```
 
 ## Local dev environment notes (this machine, Windows)
 
