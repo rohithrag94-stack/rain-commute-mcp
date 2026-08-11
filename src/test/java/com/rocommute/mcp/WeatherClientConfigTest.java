@@ -8,7 +8,14 @@ import java.time.ZoneId;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Calls the {@code @Bean} factory methods directly — no Spring context needed for three one-liners. */
+/**
+ * Calls the {@code @Bean} factory methods directly — no Spring context needed for three
+ * one-liners. Deliberately passes RFC 2606 {@code .invalid} placeholder URLs (never the real
+ * Open-Meteo hosts): {@code WebClient.Builder.build()} does no I/O, so nothing here actually
+ * makes a request regardless, but an {@code .invalid} domain keeps that true even if someone
+ * later adds a {@code .retrieve()}/{@code .block()} call, instead of silently starting to hit
+ * the live API from a unit test.
+ */
 class WeatherClientConfigTest {
 
     private final WeatherClientConfig config = new WeatherClientConfig();
@@ -22,14 +29,14 @@ class WeatherClientConfigTest {
 
     @Test
     void weatherWebClient_buildsClientWithConfiguredBaseUrl() {
-        WebClient webClient = config.weatherWebClient(WebClient.builder(), "https://api.open-meteo.com");
+        WebClient webClient = config.weatherWebClient(WebClient.builder(), "https://weather-api.invalid");
 
         assertThat(webClient).isNotNull();
     }
 
     @Test
     void geocodingWebClient_buildsClientWithConfiguredBaseUrl() {
-        WebClient webClient = config.geocodingWebClient(WebClient.builder(), "https://geocoding-api.open-meteo.com");
+        WebClient webClient = config.geocodingWebClient(WebClient.builder(), "https://geocoding-api.invalid");
 
         assertThat(webClient).isNotNull();
     }
