@@ -14,6 +14,8 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.StreamSupport;
 
 /**
@@ -37,49 +39,91 @@ public class CommuteWeatherService {
     private final WebClient webClient;
     private final GeocodingClient geocodingClient;
     private final Clock clock;
+    private final RainCommuteProperties properties;
 
     public CommuteWeatherService(
             @Qualifier("weatherWebClient") WebClient weatherWebClient,
             GeocodingClient geocodingClient,
-            Clock clock
+            Clock clock,
+            RainCommuteProperties properties
     ) {
         this.webClient = weatherWebClient;
         this.geocodingClient = geocodingClient;
         this.clock = clock;
+        this.properties = properties;
     }
 
     /**
      * Checks whether rain is expected at {@code destination} around the time you'd arrive if you
      * left right now and the commute took {@code commuteMinutes}.
      *
-     * @param destination place name or address to check, e.g. "Bengaluru" or "Eiffel Tower, Paris"
-     * @param commuteMinutes typical commute duration, in minutes
+     * @param destination place name, address, or a configured shortcut (e.g. "home"), to check
+     * @param commuteMinutes typical commute duration, in minutes; omit to use the configured default
      * @return a human-readable verdict, or an explanation of why none could be produced
      */
     @McpTool(description = "Checks the rain forecast at a destination, at the time you'd arrive "
             + "if you left now, given a commute duration in minutes. Takes a place name or "
-            + "address rather than coordinates.")
+            + "address rather than coordinates -- also accepts the user's own configured "
+            + "location shortcuts (e.g. 'home', 'work') verbatim if they mention one; pass those "
+            + "words straight through rather than asking the user for a literal address. Commute "
+            + "duration can be omitted to fall back to the user's configured default.")
     public String checkRainOnCommute(
-            @McpToolParam(description = "Destination place name or address, e.g. 'Bengaluru' or 'Eiffel Tower, Paris'")
+            @McpToolParam(
+                    description = "Destination place name or address, e.g. 'Bengaluru' or 'Eiffel Tower, Paris' -- "
+                            + "or one of the user's configured shortcuts, e.g. 'home' or 'work', if they mention one",
+                    required = true)
             String destination,
-            @McpToolParam(description = "Typical commute duration in minutes") int commuteMinutes
+            @McpToolParam(
+                    description = "Typical commute duration in minutes. Omit this to use the user's configured default.",
+                    required = false)
+            Integer commuteMinutes
     ) {
-        return switch (fetchRainOutcome(destination, commuteMinutes)) {
+        var resolvedDestination = resolveLocationAlias(destination);
+        var effectiveCommuteMinutes = commuteMinutes != null ? commuteMinutes : properties.getDefaultCommuteMinutes();
+
+        return switch (fetchRainOutcome(resolvedDestination, effectiveCommuteMinutes)) {
             case NoLocation() ->
-                "Couldn't find a place matching \"%s\" — try a more specific name.".formatted(destination);
+                "Couldn't find a place matching \"%s\" — try a more specific name.".formatted(resolvedDestination);
             case NoForecast(String label) ->
                 "Couldn't retrieve a forecast for %s.".formatted(label);
             case NoCoverage(String label, String targetHour) ->
                 "Forecast for %s doesn't cover the arrival time (%s). Try a shorter commute window."
                         .formatted(label, targetHour);
-            case Result(String label, String targetHour, int rainProbability, double rainAmount)
+            case Result(String label, String targetHour, int rainProbability, double rainAmount, List<String> alternates)
                     when rainProbability >= RAIN_PROBABILITY_THRESHOLD_PERCENT || rainAmount > 0 ->
-                "Rain likely in %s around your arrival time (%s): %d%% chance, %.1fmm expected. Grab an umbrella."
-                        .formatted(label, targetHour, rainProbability, rainAmount);
-            case Result(String label, String targetHour, int rainProbability, double rainAmount) ->
-                "Looks dry in %s around your arrival time (%s): only %d%% chance of rain."
-                        .formatted(label, targetHour, rainProbability);
+                "Rain likely in %s around your arrival time (%s): %d%% chance, %.1fmm expected. Grab an umbrella.%s"
+                        .formatted(label, targetHour, rainProbability, rainAmount, alsoConsiderSuffix(resolvedDestination, alternates));
+            case Result(String label, String targetHour, int rainProbability, double rainAmount, List<String> alternates) ->
+                "Looks dry in %s around your arrival time (%s): only %d%% chance of rain.%s"
+                        .formatted(label, targetHour, rainProbability, alsoConsiderSuffix(resolvedDestination, alternates));
         };
+    }
+
+    /**
+     * If {@code destination} matches one of the user's configured location shortcuts (case
+     * insensitive -- e.g. {@code rain-commute.locations.home}), substitutes the real place name
+     * it points at; otherwise returns {@code destination} unchanged so plain place names keep
+     * working exactly as before this feature existed.
+     */
+    private String resolveLocationAlias(String destination) {
+        return properties.getLocations().entrySet().stream()
+                .filter(entry -> entry.getKey().equalsIgnoreCase(destination.trim()))
+                .map(Map.Entry::getValue)
+                .findFirst()
+                .orElse(destination);
+    }
+
+    /**
+     * A parenthetical nudge appended to a successful verdict when the destination's name matched
+     * more than one real place worth considering (see {@link GeocodingClient}) -- empty when the
+     * match was unambiguous, which is the common case and leaves the message unchanged.
+     */
+    private static String alsoConsiderSuffix(String destination, List<String> alternateLabels) {
+        if (alternateLabels.isEmpty()) {
+            return "";
+        }
+        return " (\"%s\" could also mean %s; say so if you meant one of those.)"
+                .formatted(destination, String.join(" or ", alternateLabels));
     }
 
     /**
@@ -151,7 +195,7 @@ public class CommuteWeatherService {
 
         var rainProbability = hourly.get(PRECIPITATION_PROBABILITY_FIELD).get(idx).asInt();
         var rainAmount = hourly.get(RAIN_FIELD).get(idx).asDouble();
-        return new Result(geoLocation.label(), targetHour, rainProbability, rainAmount);
+        return new Result(geoLocation.label(), targetHour, rainProbability, rainAmount, geoLocation.alternateLabels());
     }
 
     private sealed interface RainOutcome permits NoLocation, NoForecast, NoCoverage, Result {}
@@ -165,6 +209,6 @@ public class CommuteWeatherService {
     /** A forecast was retrieved but doesn't extend as far as {@code targetHour}. */
     private record NoCoverage(String label, String targetHour) implements RainOutcome {}
 
-    /** A concrete forecast for {@code targetHour}, in the destination's own local time. */
-    private record Result(String label, String targetHour, int rainProbability, double rainAmount) implements RainOutcome {}
+    /** A concrete forecast for {@code targetHour}, in the destination's own local time, plus any same-named alternates worth flagging. */
+    private record Result(String label, String targetHour, int rainProbability, double rainAmount, List<String> alternateLabels) implements RainOutcome {}
 }

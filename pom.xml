@@ -16,7 +16,7 @@
     <version>0.1.0</version>
     <name>rain-commute-mcp</name>
     <description>MCP server that checks for rain along your commute route</description>
-    <url>https://github.com/rohithrag94-stack/rain-check</url>
+    <url>https://github.com/rohithrag94-stack/rain-commute-mcp</url>
     <inceptionYear>2026</inceptionYear>
 
     <licenses>
@@ -28,9 +28,9 @@
     </licenses>
 
     <scm>
-        <url>https://github.com/rohithrag94-stack/rain-check</url>
-        <connection>scm:git:https://github.com/rohithrag94-stack/rain-check.git</connection>
-        <developerConnection>scm:git:https://github.com/rohithrag94-stack/rain-check.git</developerConnection>
+        <url>https://github.com/rohithrag94-stack/rain-commute-mcp</url>
+        <connection>scm:git:https://github.com/rohithrag94-stack/rain-commute-mcp.git</connection>
+        <developerConnection>scm:git:https://github.com/rohithrag94-stack/rain-commute-mcp.git</developerConnection>
         <tag>HEAD</tag>
     </scm>
 

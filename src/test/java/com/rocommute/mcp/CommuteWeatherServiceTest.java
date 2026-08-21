@@ -7,11 +7,14 @@ import org.junit.jupiter.api.Test;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -40,8 +43,11 @@ class CommuteWeatherServiceTest {
     private HttpServer geocodingServer;
     private volatile String forecastResponseBody;
     private volatile String geocodingResponseBody = GEOCODING_SUCCESS_BODY;
+    /** Captures the raw "name" query param each geocoding request actually sent, regardless of the canned response. */
+    private volatile String lastGeocodingQueryName;
     private WebClient weatherWebClient;
     private GeocodingClient geocodingClient;
+    private RainCommuteProperties properties;
     private CommuteWeatherService service;
 
     @BeforeEach
@@ -51,7 +57,10 @@ class CommuteWeatherServiceTest {
         weatherServer.start();
 
         geocodingServer = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
-        geocodingServer.createContext("/v1/search", exchange -> respondWith(exchange, geocodingResponseBody));
+        geocodingServer.createContext("/v1/search", exchange -> {
+            lastGeocodingQueryName = queryParam(exchange.getRequestURI().getRawQuery(), "name");
+            respondWith(exchange, geocodingResponseBody);
+        });
         geocodingServer.start();
 
         var config = new WeatherClientConfig();
@@ -61,8 +70,9 @@ class CommuteWeatherServiceTest {
         var geocodingWebClient = config.geocodingWebClient(
                 sharedBuilder, "http://localhost:" + geocodingServer.getAddress().getPort());
         geocodingClient = new GeocodingClient(geocodingWebClient);
+        properties = new RainCommuteProperties();
 
-        service = new CommuteWeatherService(weatherWebClient, geocodingClient, FIXED_CLOCK);
+        service = new CommuteWeatherService(weatherWebClient, geocodingClient, FIXED_CLOCK, properties);
     }
 
     private static void respondWith(com.sun.net.httpserver.HttpExchange exchange, String body) throws IOException {
@@ -72,6 +82,19 @@ class CommuteWeatherServiceTest {
         try (var os = exchange.getResponseBody()) {
             os.write(bytes);
         }
+    }
+
+    private static String queryParam(String rawQuery, String key) throws UnsupportedEncodingException {
+        if (rawQuery == null) {
+            return null;
+        }
+        for (var pair : rawQuery.split("&")) {
+            var parts = pair.split("=", 2);
+            if (parts[0].equals(key)) {
+                return URLDecoder.decode(parts[1], StandardCharsets.UTF_8);
+            }
+        }
+        return null;
     }
 
     @AfterEach
@@ -202,7 +225,7 @@ class CommuteWeatherServiceTest {
     void exactHourArrival_isNotRoundedUpToNextHour() {
         // 2026-01-01T10:30:00Z is exactly 2026-01-01T16:00:00 in Asia/Kolkata (UTC+5:30).
         var exactHourClock = Clock.fixed(Instant.parse("2026-01-01T10:30:00Z"), ZoneOffset.UTC);
-        var exactHourService = new CommuteWeatherService(weatherWebClient, geocodingClient, exactHourClock);
+        var exactHourService = new CommuteWeatherService(weatherWebClient, geocodingClient, exactHourClock, properties);
         forecastResponseBody = """
                 {
                   "timezone": "Asia/Kolkata",
@@ -289,5 +312,110 @@ class CommuteWeatherServiceTest {
 
         assertThat(result).isEqualTo(
                 "Forecast for Bengaluru, India doesn't cover the arrival time (2026-01-01T17:00). Try a shorter commute window.");
+    }
+
+    /**
+     * Proves alias resolution actually rewrites the destination before geocoding runs, rather
+     * than just asserting the final message looks right (which the canned geocoding stub would
+     * make trivially true regardless): captures the literal "name" query param the geocoding
+     * request carried and checks it's the resolved place, not the raw "home" the caller typed.
+     */
+    @Test
+    void destinationMatchingConfiguredAlias_resolvesToAliasedPlaceName() {
+        properties.setLocations(Map.of("home", "Bengaluru"));
+        forecastResponseBody = """
+                {
+                  "timezone": "Asia/Kolkata",
+                  "hourly": {
+                    "time": ["2026-01-01T17:00"],
+                    "precipitation_probability": [20],
+                    "rain": [0.0]
+                  }
+                }
+                """;
+
+        var result = service.checkRainOnCommute("home", 30);
+
+        assertThat(lastGeocodingQueryName).isEqualTo("Bengaluru");
+        assertThat(result).isEqualTo(
+                "Looks dry in Bengaluru, India around your arrival time (2026-01-01T17:00): only 20% chance of rain.");
+    }
+
+    /**
+     * Alias matching is case-insensitive and untrimmed-whitespace-tolerant, since an LLM caller
+     * relaying a user's own wording won't necessarily match the configured key's exact casing.
+     */
+    @Test
+    void destinationMatchingAlias_isCaseInsensitive() {
+        properties.setLocations(Map.of("home", "Bengaluru"));
+        forecastResponseBody = """
+                {
+                  "timezone": "Asia/Kolkata",
+                  "hourly": {
+                    "time": ["2026-01-01T17:00"],
+                    "precipitation_probability": [20],
+                    "rain": [0.0]
+                  }
+                }
+                """;
+
+        service.checkRainOnCommute(" HOME ", 30);
+
+        assertThat(lastGeocodingQueryName).isEqualTo("Bengaluru");
+    }
+
+    /**
+     * Regression guard for the default-commute-minutes fallback: uses a non-default value (45,
+     * not the field default of 30) so this only passes if the configured value actually got read,
+     * not a hardcoded fallback baked into the code.
+     */
+    @Test
+    void commuteMinutesOmitted_fallsBackToConfiguredDefault() {
+        properties.setDefaultCommuteMinutes(45);
+        // 10:15:30Z + 45min = 11:00:30 -> Asia/Kolkata 16:30:30 -> rounds up to 17:00.
+        forecastResponseBody = """
+                {
+                  "timezone": "Asia/Kolkata",
+                  "hourly": {
+                    "time": ["2026-01-01T17:00"],
+                    "precipitation_probability": [20],
+                    "rain": [0.0]
+                  }
+                }
+                """;
+
+        var result = service.checkRainOnCommute("Bengaluru", null);
+
+        assertThat(result).isEqualTo(
+                "Looks dry in Bengaluru, India around your arrival time (2026-01-01T17:00): only 20% chance of rain.");
+    }
+
+    @Test
+    void alternates_getSurfacedInSuccessfulVerdictMessage() {
+        geocodingResponseBody = """
+                {
+                  "results": [
+                    {"name": "Springfield", "latitude": 37.2, "longitude": -93.3, "admin1": "Missouri", "country": "United States", "population": 200000},
+                    {"name": "Springfield", "latitude": 42.1, "longitude": -72.6, "admin1": "Massachusetts", "country": "United States", "population": 150000}
+                  ]
+                }
+                """;
+        forecastResponseBody = """
+                {
+                  "timezone": "America/Chicago",
+                  "hourly": {
+                    "time": ["2026-01-01T05:00"],
+                    "precipitation_probability": [20],
+                    "rain": [0.0]
+                  }
+                }
+                """;
+
+        var result = service.checkRainOnCommute("Springfield", 30);
+
+        assertThat(result).isEqualTo(
+                "Looks dry in Springfield, Missouri, United States around your arrival time (2026-01-01T05:00): "
+                        + "only 20% chance of rain. (\"Springfield\" could also mean Springfield, Massachusetts, "
+                        + "United States; say so if you meant one of those.)");
     }
 }

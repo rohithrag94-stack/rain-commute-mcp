@@ -9,6 +9,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -67,7 +68,7 @@ class GeocodingClientTest {
 
         var result = client.geocode("Bengaluru");
 
-        assertThat(result).contains(new GeocodingClient.GeoLocation(12.97194, 77.59369, "Bengaluru, India"));
+        assertThat(result).contains(new GeocodingClient.GeoLocation(12.97194, 77.59369, "Bengaluru, India", List.of()));
     }
 
     @Test
@@ -82,7 +83,23 @@ class GeocodingClientTest {
 
         var result = client.geocode("International Waters");
 
-        assertThat(result).contains(new GeocodingClient.GeoLocation(0.0, 0.0, "International Waters"));
+        assertThat(result).contains(new GeocodingClient.GeoLocation(0.0, 0.0, "International Waters", List.of()));
+    }
+
+    @Test
+    void placeFoundWithAdmin1_returnsLocationWithAdminRegionInLabel() {
+        responseBody = """
+                {
+                  "results": [
+                    {"name": "Springfield", "latitude": 37.2153, "longitude": -93.2982, "admin1": "Missouri", "country": "United States"}
+                  ]
+                }
+                """;
+
+        var result = client.geocode("Springfield");
+
+        assertThat(result).contains(
+                new GeocodingClient.GeoLocation(37.2153, -93.2982, "Springfield, Missouri, United States", List.of()));
     }
 
     @Test
@@ -114,5 +131,90 @@ class GeocodingClientTest {
         var result = client.geocode("Bengaluru");
 
         assertThat(result).isEmpty();
+    }
+
+    /**
+     * Mirrors the real Open-Meteo "Springfield" response used to pick the 20% threshold and the
+     * 2-alternate cap (see the constants' javadoc in GeocodingClient): four other candidates, one
+     * below threshold (15%, excluded), three above it (75%, 60%, 40%), capped to the top two by
+     * population rather than API response order.
+     */
+    @Test
+    void multipleCandidatesAboveThreshold_returnsTopTwoAlternatesSortedByPopulation() {
+        responseBody = """
+                {
+                  "results": [
+                    {"name": "Springfield", "latitude": 37.2, "longitude": -93.3, "admin1": "Missouri", "country": "United States", "population": 200000},
+                    {"name": "Springfield", "latitude": 39.8, "longitude": -89.6, "admin1": "Illinois", "country": "United States", "population": 120000},
+                    {"name": "Springfield", "latitude": 42.1, "longitude": -72.6, "admin1": "Massachusetts", "country": "United States", "population": 150000},
+                    {"name": "Springfield", "latitude": 39.9, "longitude": -83.8, "admin1": "Ohio", "country": "United States", "population": 80000},
+                    {"name": "Springfield", "latitude": 36.5, "longitude": -86.9, "admin1": "Tennessee", "country": "United States", "population": 30000}
+                  ]
+                }
+                """;
+
+        var result = client.geocode("Springfield");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().label()).isEqualTo("Springfield, Missouri, United States");
+        assertThat(result.get().alternateLabels()).containsExactly(
+                "Springfield, Massachusetts, United States",
+                "Springfield, Illinois, United States");
+    }
+
+    /**
+     * Mirrors the real Open-Meteo "Paris" response: Paris, Texas is only ~1.2% of Paris, France's
+     * population, well below the 20% threshold, so it (and the other similarly small US Parises)
+     * shouldn't be surfaced as an alternate.
+     */
+    @Test
+    void candidateBelowThreshold_isNotSurfacedAsAlternate() {
+        responseBody = """
+                {
+                  "results": [
+                    {"name": "Paris", "latitude": 48.85, "longitude": 2.35, "country": "France", "population": 2138551},
+                    {"name": "Paris", "latitude": 33.66, "longitude": -95.56, "admin1": "Texas", "country": "United States", "population": 24782}
+                  ]
+                }
+                """;
+
+        var result = client.geocode("Paris");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().alternateLabels()).isEmpty();
+    }
+
+    @Test
+    void primaryWithoutPopulation_returnsNoAlternatesRegardlessOfOtherCandidates() {
+        responseBody = """
+                {
+                  "results": [
+                    {"name": "Springfield", "latitude": 37.2, "longitude": -93.3, "admin1": "Missouri", "country": "United States"},
+                    {"name": "Springfield", "latitude": 39.8, "longitude": -89.6, "admin1": "Illinois", "country": "United States", "population": 120000}
+                  ]
+                }
+                """;
+
+        var result = client.geocode("Springfield");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().alternateLabels()).isEmpty();
+    }
+
+    @Test
+    void candidateWithoutPopulation_isExcludedFromAlternates() {
+        responseBody = """
+                {
+                  "results": [
+                    {"name": "Springfield", "latitude": 37.2, "longitude": -93.3, "admin1": "Missouri", "country": "United States", "population": 200000},
+                    {"name": "Springfield", "latitude": 39.8, "longitude": -89.6, "admin1": "Illinois", "country": "United States"}
+                  ]
+                }
+                """;
+
+        var result = client.geocode("Springfield");
+
+        assertThat(result).isPresent();
+        assertThat(result.get().alternateLabels()).isEmpty();
     }
 }

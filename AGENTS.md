@@ -17,21 +17,39 @@ src/main/java/com/rocommute/mcp/
 │                                     # configured, built from a shared Builder.clone() so neither leaks its
 │                                     # baseUrl into the other) and @Bean Clock. Exists solely to make
 │                                     # CommuteWeatherService/GeocodingClient constructor-injectable/testable.
-├── GeocodingClient.java             # Resolves a free-text place name/address to (lat, lng, label) via
-│                                     # Open-Meteo's geocoding API. Returns Optional.empty() on no-match or
-│                                     # API failure -- CommuteWeatherService doesn't distinguish the two.
-└── CommuteWeatherService.java       # The @McpTool. fetchRainOutcome() geocodes first, then returns a sealed
-                                      # RainOutcome (NoLocation / NoForecast / NoCoverage / Result record),
-                                      # dispatched via a pattern-matching switch with a guarded pattern.
+├── RainCommuteProperties.java       # @ConfigurationProperties(prefix = "rain-commute") -- location aliases
+│                                     # (locations.*) and defaultCommuteMinutes. See "Personalization" below.
+├── GeocodingClient.java             # Resolves a free-text place name/address to (lat, lng, label,
+│                                     # alternateLabels) via Open-Meteo's geocoding API. Returns Optional.empty()
+│                                     # on no-match or API failure -- CommuteWeatherService doesn't distinguish
+│                                     # the two. See "Geocoding disambiguation" below for alternateLabels.
+└── CommuteWeatherService.java       # The @McpTool. Resolves any configured location alias, falls back to the
+                                      # configured default commute duration if omitted, then fetchRainOutcome()
+                                      # geocodes and returns a sealed RainOutcome (NoLocation / NoForecast /
+                                      # NoCoverage / Result record), dispatched via a pattern-matching switch
+                                      # with a guarded pattern.
 
 src/test/java/com/rocommute/mcp/
 ├── CommuteWeatherServiceTest.java   # Stubs the weather + geocoding APIs with two independent in-process
 │                                     # com.sun.net.httpserver.HttpServer instances (JDK built-in, zero extra
 │                                     # test deps) and a Clock.fixed(...) for determinism. Two servers (not one
 │                                     # with two contexts) so "weather API down" and "geocoding API down" are
-│                                     # independently testable.
-├── GeocodingClientTest.java         # Same HttpServer-stub pattern, tests GeocodingClient in isolation.
+│                                     # independently testable. The geocoding stub also captures the raw "name"
+│                                     # query param it received, so alias-resolution tests can prove the
+│                                     # resolved place actually reached the geocoder, not just that the final
+│                                     # message looks plausible.
+├── GeocodingClientTest.java         # Same HttpServer-stub pattern, tests GeocodingClient in isolation,
+│                                     # including the population-ratio alternates heuristic against fixtures
+│                                     # mirroring real Open-Meteo responses (see "Geocoding disambiguation").
+├── RainCommutePropertiesTest.java   # Direct tests of the properties class's own defaults/getters/setters,
+│                                     # matching WeatherClientConfigTest's per-collaborator convention.
 └── WeatherClientConfigTest.java     # Calls the @Bean factory methods directly — no Spring context needed.
+
+.github/workflows/
+├── ci.yml                          # Build + test + coverage on every push/PR to main.
+└── release.yml                     # On a "v*" tag push: build, verify, then `gh release create` with the
+                                      # built jar attached -- see "Release jar" in README for why (skips
+                                      # requiring Maven for anyone who just wants to run the server).
 ```
 
 ## Timezone correctness (do not regress this)
@@ -41,6 +59,36 @@ src/test/java/com/rocommute/mcp/
 ## Rounding direction (do not regress this either)
 
 `precipitation_probability` and `rain` in Open-Meteo's hourly response are **preceding-hour** aggregates, not readings for the hour starting at that timestamp — verified directly against the live parameter table at https://open-meteo.com/en/docs (`precipitation_probability`: "Probability of precipitation with more than 0.1 mm of the *preceding hour*"; `rain`: "Rain from large scale weather systems of the *preceding hour*"). Concretely: the bucket labelled `"20:00"` describes rain that fell between 19:00 and 20:00, **not** 20:00 and 21:00. This means the target-hour lookup in `fetchRainOutcome` has to round the arrival time **up** to the next hour (except when it lands exactly on one), not floor it down — an arrival at 20:44 is inside the window the `21:00` bucket describes, so looking up `20:00` would silently return the wrong hour's data. An earlier version floored instead of rounding up, which is why this got caught late: it *looks* plausible (both are "snap to an hour"), produces a valid-looking bucket match every time (so it never surfaces as a `NoCoverage` error), and is off by exactly one hour in the common case. Regression test: `arrivalTime_isRoundedUpToNextHour_notFlooredDown` in `CommuteWeatherServiceTest`; the exact-hour edge case (which must *not* round up) is covered separately by `exactHourArrival_isNotRoundedUpToNextHour`, since it needs its own `Clock.fixed` — `FIXED_CLOCK`'s `:15:30` offset can never land on an exact minute boundary no matter how many whole commute-minutes are added to it.
+
+## Personalization: location aliases and a default commute duration
+
+`checkRainOnCommute` accepts `commuteMinutes` as a boxed `Integer` with `@McpToolParam(required = false)`, not a primitive `int` -- verified via `javap` against the actual `spring-ai-mcp-annotations-2.0.0.jar` that `required()` on `@McpToolParam` defaults to `true` (an `AnnotationDefault` of `Z#10 -> true`), so making a parameter genuinely optional needs both the explicit `required = false` *and* a nullable type, since a primitive can't represent "the caller omitted this." When `commuteMinutes` is `null`, `checkRainOnCommute` falls back to `RainCommuteProperties.getDefaultCommuteMinutes()` (baked-in default: 30, itself overridable -- see below).
+
+`destination` also gets resolved against `RainCommuteProperties.getLocations()` (case-insensitively, trimmed) before geocoding runs -- so a user can say "will it rain at home" and, if they've configured `rain-commute.locations.home=Bengaluru`, the tool geocodes "Bengaluru", not the literal word "home". `CommuteWeatherServiceTest`'s geocoding stub captures the raw `name` query parameter it actually received specifically to prove this substitution happens before the HTTP call, not just that the final message text happens to look right.
+
+Both the per-user location aliases and the default commute duration are meant to be user-editable *without rebuilding the jar*, so they live in an external file layered on top of the bundled `application.properties` via:
+
+```
+spring.config.import=optional:file:${user.home}/.rain-commute-mcp/config.properties
+```
+
+Verified live (not assumed): `${user.home}` resolves correctly at this stage of Spring Boot's config-loading pipeline (it's a JVM system property, available before the `Environment` is fully assembled), and properties in the imported file take precedence over the ones in the classpath `application.properties` that declared the import -- confirmed by setting `rain-commute.default-commute-minutes=2` in a real file at that path and observing the tool actually use 2 minutes instead of the bundled 30, and by configuring `rain-commute.locations.home=Bengaluru` there and confirming an MCP Inspector call with `destination=home` sent `name=Bengaluru` to the real geocoding API. The `optional:` prefix matters: without it, a user who never creates this file would get a startup failure instead of the bundled defaults.
+
+`RainCommuteProperties` binds via a plain `@Component @ConfigurationProperties(prefix = "rain-commute")` class (JavaBean getters/setters, no builder/constructor-binding) -- Spring Boot's component scan picks this up automatically in a `@SpringBootApplication`, no `@EnableConfigurationProperties` registration needed. Its `Map<String, String> locations` field binds arbitrary user-defined keys under `rain-commute.locations.*` (e.g. `rain-commute.locations.work=...`), which is the reason it's a `@ConfigurationProperties` map rather than individual `@Value` injections like `WeatherClientConfig` uses elsewhere -- `@Value` has no clean way to bind an open-ended set of caller-chosen keys.
+
+**A real geocoding gotcha found while verifying this, worth knowing before writing your own location aliases**: Open-Meteo's geocoder found `Electronic City` on its own, but returned zero results for `Electronic City, Bengaluru` (verified live via direct `curl` to `geocoding-api.open-meteo.com`) -- unlike `Eiffel Tower, Paris`, which resolves fine. It's not consistent about "specific place, containing city" compound queries. If a configured alias value returns `NoLocation`, try the bare place name before assuming the alias mechanism itself is broken.
+
+## Geocoding disambiguation
+
+`GeocodingClient.geocode` requests `count=5` (not 1) from Open-Meteo and surfaces same-named alternates on `GeoLocation.alternateLabels()`, which `CommuteWeatherService` appends as a parenthetical note on a successful verdict (`checkRainOnCommute`'s `alsoConsiderSuffix`) -- e.g. asking about "Springfield" gets an answer for Springfield, Missouri *and* a note that Massachusetts and Illinois also matched. This exists because the previous behavior (`count=1`, silently take the top match) could confidently answer for the wrong place with no error and no signal anything was ambiguous.
+
+The threshold for "worth mentioning" is a population ratio, not a fixed rank cutoff, and the exact number (**20%**) was picked by checking real Open-Meteo responses rather than guessing -- see the constants' javadoc in `GeocodingClient`:
+- `Springfield` returns five real US candidates ranging 16.8k-170k people; the smallest that's still genuinely plausible is ~35% of the largest. Genuinely ambiguous, worth asking about.
+- `Paris` returns Paris, France (2.1M) then Paris, Texas (24.8k, ~1.2% of France's population) and smaller. Not worth interrupting a confident answer for.
+
+20% cleanly separates those two real cases. Alternates are also capped at 2 (`MAX_ALTERNATES`) and sorted by population descending, since Open-Meteo's response order is *not* population-sorted (verified: the live Springfield response above comes back Missouri/Illinois/Massachusetts/Ohio/Tennessee by population 170k/114k/154k/59k/17k -- Illinois and Massachusetts are out of population order in the raw response). If the primary match has no `population` field to compare against, no alternates are surfaced at all -- there's nothing to judge prominence by, so the code doesn't guess.
+
+Labels also changed from "Name, Country" to "Name, Admin region, Country" (e.g. `Springfield, Missouri, United States`) specifically because same-named US alternates are otherwise indistinguishable by country alone -- all five Springfields would have rendered as "Springfield, United States". Regression tests for all of the above are in `GeocodingClientTest` (using fixtures that mirror the real Springfield/Paris data above) and `CommuteWeatherServiceTest.alternates_getSurfacedInSuccessfulVerdictMessage` (proving the suffix reaches the actual tool response, not just `GeocodingClient`'s own return value).
 
 ## Version-specific gotchas (verified against live docs/jars, not assumed)
 
@@ -81,8 +129,9 @@ This stack moved fast between Spring AI 1.x-era tutorials (what most existing bl
 
    npx @modelcontextprotocol/inspector --cli --config mcp-config.json --server rain-commute \
      --method tools/call --tool-name checkRainOnCommute \
-     --tool-arg destLat=52.3676 --tool-arg destLng=4.9041 --tool-arg commuteMinutes=30
+     --tool-arg destination=Bengaluru --tool-arg commuteMinutes=30
    ```
+3. **Testing the external config override** (`spring.config.import`, location aliases, default commute minutes -- see "Personalization" above): create a real file at `~/.rain-commute-mcp/config.properties` (or the OS-appropriate `${user.home}`), then call the tool omitting `commuteMinutes` and/or passing a configured alias as `destination`, and confirm the *effective* values changed -- e.g. set `rain-commute.default-commute-minutes=2`, omit `commuteMinutes` in the call, and check the returned arrival hour reflects +2 minutes rather than the bundled +30. Remove the file afterward if it was only for testing; nothing in the repo depends on it existing.
 
 ## Local dev environment notes (this machine, Windows)
 
