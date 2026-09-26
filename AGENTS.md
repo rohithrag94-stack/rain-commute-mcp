@@ -179,12 +179,12 @@ This stack moved fast between Spring AI 1.x-era tutorials (what most existing bl
 
 `mvn verify`'s 100% coverage does **not** exercise the Spring context or `application.properties` (see above) — it's not a substitute for actually starting the server. Two ways to do that:
 
-1. **Standalone**, to catch startup failures fast: `java -jar target/rain-commute-mcp-0.1.0.jar` with stdin left open (don't redirect from `/dev/null`/`NUL` — that's immediate EOF, which a stdio server correctly treats as "client disconnected" and exits, which looks identical to a real crash unless you check carefully). A healthy server just sits there silently.
+1. **Standalone**, to catch startup failures fast: `java -jar target/rain-commute-mcp-0.2.0.jar` with stdin left open (don't redirect from `/dev/null`/`NUL` — that's immediate EOF, which a stdio server correctly treats as "client disconnected" and exits, which looks identical to a real crash unless you check carefully). A healthy server just sits there silently.
 2. **MCP Inspector CLI**, to actually call the tool: the web UI (`npx @modelcontextprotocol/inspector java -jar ...`, opens `localhost:6274`) is fine for poking around interactively, but its positional-argument parsing chokes on `-jar` (a token starting with `-` inside the target command breaks its variadic-arg collection) and its own "Servers" landing page in recent versions has no in-page tool-calling UI — connecting there only proves the JSON-RPC handshake works, not that a tool call succeeds. The **CLI mode with an explicit config file** sidesteps both problems and is the reliable option:
 
    ```json
    // mcp-config.json
-   { "mcpServers": { "rain-commute": { "command": "java", "args": ["-jar", "target/rain-commute-mcp-0.1.0.jar"] } } }
+   { "mcpServers": { "rain-commute": { "command": "java", "args": ["-jar", "target/rain-commute-mcp-0.2.0.jar"] } } }
    ```
 
    Gotchas hit while testing the timeout/retry work: (a) the Inspector's stdio transport does **not** forward your shell's environment to the server it spawns (only a small safe list), so to set env vars for a run put them in the config's `"env"` object; (b) use forward slashes in the jar path inside that JSON -- backslash paths are easy to escape wrongly and fail with "Bad escaped character"; (c) Spring Boot's *canonical* env-var form for `rain-commute.http-timeout` is `RAINCOMMUTE_HTTPTIMEOUT`, but the legacy form with dashes turned into underscores (`RAIN_COMMUTE_HTTP_TIMEOUT`, `RAIN_COMMUTE_WEATHER_API_BASE_URL`) is also accepted and is what this repo documents -- a mixed form like `RAIN_COMMUTE_HTTPTIMEOUT` is silently ignored.

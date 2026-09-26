@@ -13,7 +13,7 @@
 
     <groupId>com.rocommute</groupId>
     <artifactId>rain-commute-mcp</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
     <name>rain-commute-mcp</name>
     <description>MCP server that checks for rain along your commute route</description>
     <url>https://github.com/rohithrag94-stack/rain-commute-mcp</url>

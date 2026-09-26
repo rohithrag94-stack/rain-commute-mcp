@@ -75,14 +75,14 @@ Don't want to build it yourself? Grab the prebuilt jar from [Releases](https://g
 mvn clean install
 ```
 
-This produces an executable jar at `target/rain-commute-mcp-0.1.0.jar` and runs the full test suite with a coverage check (see [Testing](#testing) below).
+This produces an executable jar at `target/rain-commute-mcp-0.2.0.jar` and runs the full test suite with a coverage check (see [Testing](#testing) below).
 
 ## Running
 
 The server communicates over stdio (standard MCP transport for local tools), so it's meant to be launched by an MCP client rather than run standalone. To try it directly:
 
 ```bash
-java -jar target/rain-commute-mcp-0.1.0.jar
+java -jar target/rain-commute-mcp-0.2.0.jar
 ```
 
 It will sit waiting for JSON-RPC messages on stdin — that's expected. Use MCP Inspector or a real client to talk to it (see below).
@@ -90,7 +90,7 @@ It will sit waiting for JSON-RPC messages on stdin — that's expected. Use MCP 
 ### Testing with MCP Inspector
 
 ```bash
-npx @modelcontextprotocol/inspector java -jar target/rain-commute-mcp-0.1.0.jar
+npx @modelcontextprotocol/inspector java -jar target/rain-commute-mcp-0.2.0.jar
 ```
 
 This opens a local web UI where you can call `checkRainOnCommute` and `suggestDepartureTime` directly and inspect the raw request/response.
@@ -104,7 +104,7 @@ Add an entry to your `claude_desktop_config.json`:
   "mcpServers": {
     "rain-commute": {
       "command": "java",
-      "args": ["-jar", "/absolute/path/to/rain-commute-mcp-0.1.0.jar"]
+      "args": ["-jar", "/absolute/path/to/rain-commute-mcp-0.2.0.jar"]
     }
   }
 }
@@ -124,7 +124,7 @@ Restart Claude Desktop and the `checkRainOnCommute` and `suggestDepartureTime` t
 | `rain-commute.http-max-retries` | `2` | How many times a transient failure (timeout, dropped connection, 5xx, 429) is retried. `0` disables retrying. |
 | `rain-commute.http-retry-backoff` | `300ms` | Delay before the first retry; doubles on each further one. |
 | `spring.ai.mcp.server.name` | `rain-commute-mcp` | MCP server name advertised to clients. |
-| `spring.ai.mcp.server.version` | `0.1.0` | MCP server version advertised to clients. |
+| `spring.ai.mcp.server.version` | `0.2.0` | MCP server version advertised to clients. |
 
 Set any of these via `src/main/resources/application.properties` (rebuild required), environment variables (e.g. `RAIN_COMMUTE_WEATHER_API_BASE_URL`, `RAIN_COMMUTE_HTTP_TIMEOUT`), `-D` system properties, or the external file described in [Personalizing it](#personalizing-it), which needs no rebuild. When the server is launched by an MCP client, environment variables have to be passed through the client's own `env` setting for that server (most clients don't forward your shell's environment); the external file avoids that.
 
