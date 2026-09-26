@@ -8,17 +8,40 @@ An [MCP](https://modelcontextprotocol.io) server that checks whether rain is exp
 
 ## How it works
 
-The server exposes a single MCP tool, `checkRainOnCommute`, backed by the free [Open-Meteo](https://open-meteo.com/) forecast and geocoding APIs:
+The server exposes two MCP tools, both backed by the free [Open-Meteo](https://open-meteo.com/) forecast and geocoding APIs:
+
+- **`checkRainOnCommute`** — "will it rain when I get there?" Answers for the hour you'd arrive if you left now.
+- **`suggestDepartureTime`** — "should I wait, and for how long?" If leaving now means arriving in rain, finds the soonest departure that arrives dry. See [Deciding when to leave](#deciding-when-to-leave).
+
+`checkRainOnCommute` works like this:
 
 1. Takes a destination as a plain place name or address (e.g. `"Bengaluru"`, `"Eiffel Tower, Paris"`, or a saved shortcut like `"home"` — see [Personalizing it](#personalizing-it)) and a commute duration in minutes (optional — falls back to a configurable default) — no coordinates required.
 2. Geocodes the destination to coordinates. If the name matches more than one real place (e.g. "Springfield"), the answer still comes back for the best match, with a note about the others in case that wasn't the one you meant — see [How disambiguation works](#how-disambiguation-works).
 3. Computes your arrival time (now + commute duration, rounded up to the next hour — see [How rounding works](#how-rounding-works)) **in the destination's own local timezone**, from its forecast response — not the server's timezone, so results are correct no matter where the user or the server process happens to be.
-4. Fetches the hourly forecast for that location and reads off precipitation probability and rain amount for the arrival hour.
-5. Returns a plain-language verdict — dry, or grab an umbrella.
+4. Fetches the hourly forecast for that location and reads off precipitation probability, rain amount, temperature, and wind for the arrival hour.
+5. Returns a plain-language verdict — dry, or grab an umbrella — with the temperature and wind alongside. If it's dry when you arrive but rain is forecast within the following 3 hours, it says so, since "dry on arrival" is little comfort if the downpour starts ten minutes later.
+
+Both tools accept the same place names and [saved shortcuts](#personalizing-it).
 
 ### How disambiguation works
 
 Some place names match more than one real location — "Springfield" alone matches at least five distinct US cities. Rather than silently picking one and possibly answering for the wrong place with no indication anything was ambiguous, the tool checks up to 5 candidates and mentions any others whose population is at least 20% of the top match's (e.g. asking about "Springfield" gets an answer for Springfield, Missouri, plus a note that Massachusetts and Illinois also matched). A name with one dominant match (e.g. "Paris" — Paris, France vs. Paris, Texas at roughly 1% of its population) gets a clean answer with no extra noise. See `GeocodingClient` in [AGENTS.md](AGENTS.md) for exactly how the threshold was picked.
+
+### Deciding when to leave
+
+`suggestDepartureTime` takes the same destination and commute duration, plus an optional `lookaheadHours` (default 3, capped at 12). It tries a departure every 15 minutes from now through the look-ahead window, works out the arrival hour for each (using the same [rounding rules](#how-rounding-works)), and reports one of:
+
+- **Leave now** — arriving dry already.
+- **Wait N minutes** — the earliest departure that arrives in a dry hour.
+- **Nothing dry** — every departure it could check arrives in rain; it names the least rainy one and how far ahead it actually checked (the forecast can end before the look-ahead does).
+
+The wait is always given relative to now ("in about 45 minutes"), never as a clock time, because your timezone may differ from the destination's and only the destination's is known.
+
+### Reliability and caching
+
+Open-Meteo is a free public service, so the server doesn't treat one bad response as the final answer: each request has a timeout (5 s), and transient failures — a timeout, a dropped connection, a 5xx, or a 429 — are retried twice with a short, growing delay. A request that can never succeed (a 4xx) fails immediately instead of being hammered. All three numbers are configurable (see [Configuration](#configuration)). If the API is still failing after the retries, you get a plain "couldn't retrieve a forecast" message rather than an error.
+
+Resolved place names are cached in memory for 24 hours (up to 100 names, least recently used dropped first), so asking about "home" or "work" again skips the geocoding round trip. Only successful matches are cached; a failed lookup is never remembered, so a brief outage can't stick to a place name.
 
 ### How rounding works
 
@@ -70,7 +93,7 @@ It will sit waiting for JSON-RPC messages on stdin — that's expected. Use MCP 
 npx @modelcontextprotocol/inspector java -jar target/rain-commute-mcp-0.1.0.jar
 ```
 
-This opens a local web UI where you can call `checkRainOnCommute` directly and inspect the raw request/response.
+This opens a local web UI where you can call `checkRainOnCommute` and `suggestDepartureTime` directly and inspect the raw request/response.
 
 ### Wiring into Claude Desktop
 
@@ -87,7 +110,7 @@ Add an entry to your `claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop and the `checkRainOnCommute` tool becomes available in conversation.
+Restart Claude Desktop and the `checkRainOnCommute` and `suggestDepartureTime` tools become available in conversation.
 
 ## Configuration
 
@@ -97,10 +120,13 @@ Restart Claude Desktop and the `checkRainOnCommute` tool becomes available in co
 | `rain-commute.geocoding-api.base-url` | `https://geocoding-api.open-meteo.com` | Base URL of the place-name geocoding API. Override to point at a mock/staging endpoint. |
 | `rain-commute.default-commute-minutes` | `30` | Commute duration used when a request omits `commuteMinutes`. |
 | `rain-commute.locations.<name>` | *(none)* | A location shortcut, e.g. `rain-commute.locations.home=Bengaluru` — see [Personalizing it](#personalizing-it). Any number of these can be set. |
+| `rain-commute.http-timeout` | `5s` | How long one request to Open-Meteo may take before that attempt is abandoned. |
+| `rain-commute.http-max-retries` | `2` | How many times a transient failure (timeout, dropped connection, 5xx, 429) is retried. `0` disables retrying. |
+| `rain-commute.http-retry-backoff` | `300ms` | Delay before the first retry; doubles on each further one. |
 | `spring.ai.mcp.server.name` | `rain-commute-mcp` | MCP server name advertised to clients. |
 | `spring.ai.mcp.server.version` | `0.1.0` | MCP server version advertised to clients. |
 
-Set any of these via `src/main/resources/application.properties` (rebuild required), environment variables (e.g. `RAIN_COMMUTE_WEATHER_API_BASE_URL`), `-D` system properties, or — for the two personalization properties specifically — the external file described in [Personalizing it](#personalizing-it), which needs no rebuild.
+Set any of these via `src/main/resources/application.properties` (rebuild required), environment variables (e.g. `RAIN_COMMUTE_WEATHER_API_BASE_URL`, `RAIN_COMMUTE_HTTP_TIMEOUT`), `-D` system properties, or the external file described in [Personalizing it](#personalizing-it), which needs no rebuild. When the server is launched by an MCP client, environment variables have to be passed through the client's own `env` setting for that server (most clients don't forward your shell's environment); the external file avoids that.
 
 ## Testing
 
@@ -116,9 +142,14 @@ Runs the unit test suite and enforces 100% line and method coverage via JaCoCo (
 src/main/java/com/rocommute/mcp/
 ├── RainCommuteMcpApplication.java   # Boot entry point (excluded from coverage — no testable logic)
 ├── WeatherClientConfig.java         # WebClient (weather + geocoding) + Clock beans
-├── RainCommuteProperties.java       # Location shortcuts + default commute minutes (user-configurable)
-├── GeocodingClient.java             # Resolves a place name/address to coordinates, with disambiguation
-└── CommuteWeatherService.java       # The @McpTool and its forecast logic
+├── RainCommuteProperties.java       # Location shortcuts, default commute, HTTP timeout/retry settings
+├── ResilientJsonFetcher.java        # GET + timeout + bounded retry with backoff, shared by both API clients
+├── GeocodingClient.java             # Resolves a place name/address to coordinates, with disambiguation + caching
+├── ExpiringLruCache.java            # Tiny TTL + LRU cache (no library) backing the geocoding cache
+├── ForecastClient.java              # Fetches + parses the hourly forecast into a Forecast
+├── Forecast.java                    # Hourly forecast model: arrival-hour rounding, lookups, rain heads-up
+├── DepartureAdvisor.java            # Pure logic behind suggestDepartureTime
+└── CommuteWeatherService.java       # The two @McpTools and their user-facing messages
 ```
 
 See [AGENTS.md](AGENTS.md) for a deeper architectural overview, the stack's version-specific gotchas, and conventions for anyone (human or agent) picking this repo up cold.

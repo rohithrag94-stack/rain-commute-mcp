@@ -2,6 +2,7 @@ package com.rocommute.mcp;
 
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -39,5 +40,27 @@ class RainCommutePropertiesTest {
         properties.setDefaultCommuteMinutes(45);
 
         assertThat(properties.getDefaultCommuteMinutes()).isEqualTo(45);
+    }
+
+    @Test
+    void freshInstance_hasConservativeHttpResilienceDefaults() {
+        var properties = new RainCommuteProperties();
+
+        assertThat(properties.getHttpTimeout()).isEqualTo(Duration.ofSeconds(5));
+        assertThat(properties.getHttpMaxRetries()).isEqualTo(2);
+        assertThat(properties.getHttpRetryBackoff()).isEqualTo(Duration.ofMillis(300));
+    }
+
+    @Test
+    void httpSettersAreReflectedByGetters() {
+        var properties = new RainCommuteProperties();
+
+        properties.setHttpTimeout(Duration.ofSeconds(9));
+        properties.setHttpMaxRetries(4);
+        properties.setHttpRetryBackoff(Duration.ofSeconds(1));
+
+        assertThat(properties.getHttpTimeout()).isEqualTo(Duration.ofSeconds(9));
+        assertThat(properties.getHttpMaxRetries()).isEqualTo(4);
+        assertThat(properties.getHttpRetryBackoff()).isEqualTo(Duration.ofSeconds(1));
     }
 }

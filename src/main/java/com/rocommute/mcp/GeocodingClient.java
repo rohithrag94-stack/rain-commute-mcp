@@ -3,11 +3,13 @@ package com.rocommute.mcp;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
-import org.springframework.web.reactive.function.client.WebClientException;
 import tools.jackson.databind.JsonNode;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.stream.StreamSupport;
 
@@ -42,38 +44,62 @@ public class GeocodingClient {
     /** Cap how many alternates get mentioned, so a genuinely ambiguous name doesn't produce a wall of text. */
     private static final int MAX_ALTERNATES = 2;
 
-    private final WebClient webClient;
+    /**
+     * A place doesn't move, so a resolved name is good for a day -- long enough that repeat
+     * questions ("home", "work", the same destination again) skip the network round trip
+     * entirely, short enough that a corrected or renamed place eventually shows up.
+     */
+    static final Duration CACHE_TIME_TO_LIVE = Duration.ofHours(24);
 
-    public GeocodingClient(@Qualifier("geocodingWebClient") WebClient geocodingWebClient) {
+    /** Bounds memory for a long-lived server process; least-recently-used names are evicted first. */
+    static final int CACHE_MAX_ENTRIES = 100;
+
+    private final WebClient webClient;
+    private final ResilientJsonFetcher fetcher;
+    private final ExpiringLruCache<GeoLocation> cache;
+
+    public GeocodingClient(
+            @Qualifier("geocodingWebClient") WebClient geocodingWebClient,
+            ResilientJsonFetcher fetcher,
+            Clock clock
+    ) {
         this.webClient = geocodingWebClient;
+        this.fetcher = fetcher;
+        this.cache = new ExpiringLruCache<>(clock, CACHE_TIME_TO_LIVE, CACHE_MAX_ENTRIES);
     }
 
     /**
+     * Only successful matches are cached. A miss is never remembered, because "no match" and
+     * "the API was briefly unreachable" look identical from here, and a transient outage must not
+     * stick to a place name for a day.
+     *
      * @param placeName free-text place name or address to resolve
      * @return the best-matching location, or empty if no match was found or the API call failed
      */
     public Optional<GeoLocation> geocode(String placeName) {
-        JsonNode response;
-        try {
-            response = webClient.get()
-                    .uri(uriBuilder -> uriBuilder
-                            .path(SEARCH_PATH)
-                            .queryParam("name", placeName)
-                            .queryParam("count", CANDIDATE_LIMIT)
-                            .queryParam("language", "en")
-                            .build())
-                    .retrieve()
-                    .bodyToMono(JsonNode.class)
-                    .block();
-        } catch (WebClientException e) {
+        var cacheKey = placeName.trim().toLowerCase(Locale.ROOT);
+        var cached = cache.get(cacheKey);
+        if (cached.isPresent()) {
+            return cached;
+        }
+        var location = lookUp(placeName);
+        location.ifPresent(found -> cache.put(cacheKey, found));
+        return location;
+    }
+
+    private Optional<GeoLocation> lookUp(String placeName) {
+        var response = fetcher.get(webClient, uriBuilder -> uriBuilder
+                .path(SEARCH_PATH)
+                .queryParam("name", placeName)
+                .queryParam("count", CANDIDATE_LIMIT)
+                .queryParam("language", "en")
+                .build());
+
+        if (response.isEmpty() || !response.get().has(RESULTS_FIELD) || response.get().get(RESULTS_FIELD).isEmpty()) {
             return Optional.empty();
         }
 
-        if (!response.has(RESULTS_FIELD) || response.get(RESULTS_FIELD).isEmpty()) {
-            return Optional.empty();
-        }
-
-        var results = response.get(RESULTS_FIELD);
+        var results = response.get().get(RESULTS_FIELD);
         var primary = results.get(0);
 
         return Optional.of(new GeoLocation(

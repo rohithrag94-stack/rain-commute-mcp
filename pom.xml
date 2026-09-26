@@ -175,14 +175,17 @@
                                             javac wraps pattern-matching switch cases in a synthetic
                                             MatchException catch/throw that JaCoCo counts as branches but
                                             that ordinary tests can never reach (jacoco/jacoco#1514,
-                                            jacoco/jacoco#1219). All 4 currently-missed branches are this
-                                            synthetic path; ceiling is pinned to that known baseline so any
-                                            *new* real gap still fails the build.
+                                            jacoco/jacoco#1219). All 3 currently-missed branches are this
+                                            synthetic path, one per pattern-matching switch in
+                                            CommuteWeatherService (the Lookup switch in each of the two
+                                            tools, and the DepartureAdvisor.Advice switch); ceiling is
+                                            pinned to that known baseline so any *new* real gap still
+                                            fails the build.
                                         -->
                                         <limit>
                                             <counter>BRANCH</counter>
                                             <value>MISSEDCOUNT</value>
-                                            <maximum>4</maximum>
+                                            <maximum>3</maximum>
                                         </limit>
                                     </limits>
                                 </rule>

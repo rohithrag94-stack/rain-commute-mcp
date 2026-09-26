@@ -9,7 +9,10 @@ import org.springframework.web.reactive.function.client.WebClient;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -24,12 +27,15 @@ class GeocodingClientTest {
 
     private HttpServer server;
     private volatile String responseBody;
+    private final AtomicInteger requestCount = new AtomicInteger();
+    private final MutableClock clock = new MutableClock(Instant.parse("2026-01-01T10:00:00Z"));
     private GeocodingClient client;
 
     @BeforeEach
     void startServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/v1/search", exchange -> {
+            requestCount.incrementAndGet();
             var bytes = responseBody.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().add("Content-Type", "application/json");
             exchange.sendResponseHeaders(200, bytes.length);
@@ -48,7 +54,7 @@ class GeocodingClientTest {
         config.weatherWebClient(sharedBuilder, "http://localhost:1");
         var geocodingWebClient = config.geocodingWebClient(
                 sharedBuilder, "http://localhost:" + server.getAddress().getPort());
-        client = new GeocodingClient(geocodingWebClient);
+        client = new GeocodingClient(geocodingWebClient, TestHttp.fetcher(0), clock);
     }
 
     @AfterEach
@@ -216,5 +222,84 @@ class GeocodingClientTest {
 
         assertThat(result).isPresent();
         assertThat(result.get().alternateLabels()).isEmpty();
+    }
+
+    // ---- caching ----
+
+    private static final String BENGALURU_BODY = """
+            {
+              "results": [
+                {"name": "Bengaluru", "latitude": 12.97194, "longitude": 77.59369, "country": "India"}
+              ]
+            }
+            """;
+
+    @Test
+    void repeatedLookup_isServedFromCacheWithoutAnotherRequest() {
+        responseBody = BENGALURU_BODY;
+
+        var first = client.geocode("Bengaluru");
+        var second = client.geocode("Bengaluru");
+
+        assertThat(second).isEqualTo(first).isPresent();
+        assertThat(requestCount).hasValue(1);
+    }
+
+    @Test
+    void cacheKey_ignoresCaseAndSurroundingWhitespace() {
+        responseBody = BENGALURU_BODY;
+
+        client.geocode("Bengaluru");
+        var second = client.geocode("  BENGALURU ");
+
+        assertThat(second).isPresent();
+        assertThat(requestCount).hasValue(1);
+    }
+
+    /**
+     * A miss must never be remembered: "no match" and "the API was briefly down" are
+     * indistinguishable to GeocodingClient, and a transient outage must not stick to a name.
+     */
+    @Test
+    void failedLookup_isNotCached() {
+        responseBody = """
+                {"generationtime_ms": 0.2}
+                """;
+        assertThat(client.geocode("Bengaluru")).isEmpty();
+
+        responseBody = BENGALURU_BODY;
+        var retry = client.geocode("Bengaluru");
+
+        assertThat(retry).isPresent();
+        assertThat(requestCount).hasValue(2);
+    }
+
+    @Test
+    void cachedEntry_expiresAfterTimeToLive() {
+        responseBody = BENGALURU_BODY;
+        client.geocode("Bengaluru");
+
+        clock.advance(GeocodingClient.CACHE_TIME_TO_LIVE.minusSeconds(1));
+        client.geocode("Bengaluru");
+        assertThat(requestCount).as("still fresh just before the TTL").hasValue(1);
+
+        clock.advance(Duration.ofSeconds(1));
+        client.geocode("Bengaluru");
+        assertThat(requestCount).as("refetched once the TTL has elapsed").hasValue(2);
+    }
+
+    @Test
+    void cache_evictsLeastRecentlyUsedNameOnceFull() {
+        responseBody = BENGALURU_BODY;
+        for (var i = 0; i <= GeocodingClient.CACHE_MAX_ENTRIES; i++) {
+            client.geocode("place" + i);
+        }
+        assertThat(requestCount).hasValue(GeocodingClient.CACHE_MAX_ENTRIES + 1);
+
+        client.geocode("place" + GeocodingClient.CACHE_MAX_ENTRIES);
+        assertThat(requestCount).as("most recent name is still cached").hasValue(GeocodingClient.CACHE_MAX_ENTRIES + 1);
+
+        client.geocode("place0");
+        assertThat(requestCount).as("oldest name was evicted").hasValue(GeocodingClient.CACHE_MAX_ENTRIES + 2);
     }
 }
